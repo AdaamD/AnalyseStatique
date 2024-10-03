@@ -1,0 +1,222 @@
+package part2;
+
+import org.eclipse.jdt.core.dom.*;
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.*;
+import java.util.stream.Collectors;
+
+public class ASTAnalyzer {
+    private List<OOMetricsVisitor.ClassInfo> allClassInfos;
+    private int totalProjectLines;
+    private int maxParameters;
+    private int methodThreshold;
+    private Map<String, Set<String>> callGraph;
+
+    public void analyze(String projectPath, int methodThreshold) {
+        this.methodThreshold = methodThreshold;
+        List<Path> javaFiles = findJavaFiles(projectPath);
+        
+        if (javaFiles.isEmpty()) {
+            System.out.println("Aucun fichier Java trouvé dans le répertoire spécifié.");
+            return;
+        }
+
+        allClassInfos = new ArrayList<>();
+        totalProjectLines = 0;
+        maxParameters = 0;
+
+        CallGraphVisitor callGraphVisitor = new CallGraphVisitor();
+
+        for (Path filePath : javaFiles) {
+            String source = readFile(filePath.toString());
+            if (source == null) {
+                System.out.println("Le fichier " + filePath + " n'a pas pu être lu ou est vide.");
+                continue;
+            }
+
+            ASTParser parser = ASTParser.newParser(AST.JLS4);
+            parser.setSource(source.toCharArray());
+            parser.setKind(ASTParser.K_COMPILATION_UNIT);
+
+            CompilationUnit cu = (CompilationUnit) parser.createAST(null);
+
+            OOMetricsVisitor visitor = new OOMetricsVisitor();
+            cu.accept(visitor);
+
+            allClassInfos.addAll(visitor.getClassInfoList());
+            totalProjectLines += visitor.getTotalLineCount();
+            maxParameters = Math.max(maxParameters, visitor.getMaxParameters());
+
+            cu.accept(callGraphVisitor);
+        }
+
+        this.callGraph = callGraphVisitor.getCallGraph();
+    }
+
+    public int getTotalClasses() {
+        return allClassInfos.size();
+    }
+
+    public int getTotalLines() {
+        return totalProjectLines;
+    }
+
+    public int getTotalMethods() {
+        return allClassInfos.stream().mapToInt(c -> c.methodCount).sum();
+    }
+
+    public int getTotalPackages() {
+        return (int) allClassInfos.stream().map(c -> c.packageName).distinct().count();
+    }
+
+    public double getAvgMethodsPerClass() {
+        return getTotalClasses() > 0 ? (double) getTotalMethods() / getTotalClasses() : 0;
+    }
+
+    public double getAvgLinesPerMethod() {
+        return getTotalMethods() > 0 ? (double) getTotalLines() / getTotalMethods() : 0;
+    }
+
+    public double getAvgAttributesPerClass() {
+        int totalAttributes = allClassInfos.stream().mapToInt(c -> c.attributeCount).sum();
+        return getTotalClasses() > 0 ? (double) totalAttributes / getTotalClasses() : 0;
+    }
+
+    public List<OOMetricsVisitor.ClassInfo> getTopMethodClasses() {
+        int topClassesCount = Math.max(1, getTotalClasses() / 10);
+        return allClassInfos.stream()
+                .sorted((c1, c2) -> Integer.compare(c2.methodCount, c1.methodCount))
+                .limit(topClassesCount)
+                .collect(Collectors.toList());
+    }
+
+    public List<OOMetricsVisitor.ClassInfo> getTopAttributeClasses() {
+        int topClassesCount = Math.max(1, getTotalClasses() / 10);
+        return allClassInfos.stream()
+                .sorted((c1, c2) -> Integer.compare(c2.attributeCount, c1.attributeCount))
+                .limit(topClassesCount)
+                .collect(Collectors.toList());
+    }
+
+    public List<OOMetricsVisitor.ClassInfo> getTopMethodAndAttributeClasses() {
+        List<OOMetricsVisitor.ClassInfo> topMethodClasses = getTopMethodClasses();
+        List<OOMetricsVisitor.ClassInfo> topAttributeClasses = getTopAttributeClasses();
+        return allClassInfos.stream()
+                .filter(c -> topMethodClasses.contains(c) && topAttributeClasses.contains(c))
+                .collect(Collectors.toList());
+    }
+
+    public List<OOMetricsVisitor.ClassInfo> getClassesWithManyMethods() {
+        return allClassInfos.stream()
+                .filter(c -> c.methodCount > methodThreshold)
+                .collect(Collectors.toList());
+    }
+
+    public int getMaxParameters() {
+        return maxParameters;
+    }
+
+    public List<OOMetricsVisitor.ClassInfo> getAllClassInfos() {
+        return allClassInfos;
+    }
+
+    public Map<String, Set<String>> getCallGraph() {
+        return callGraph;
+    }
+
+    public void printResults() {
+        System.out.println("\nAnalyse du projet terminée\n");
+        System.out.println("1. Nombre total de classes : " + getTotalClasses());
+        System.out.println("2. Nombre total de lignes de code : " + getTotalLines());
+        System.out.println("3. Nombre total de méthodes : " + getTotalMethods());
+        System.out.println("4. Nombre total de packages : " + getTotalPackages());
+        System.out.println("5. Nombre moyen de méthodes par classe : " + String.format("%.2f", getAvgMethodsPerClass()));
+        System.out.println("6. Nombre moyen de lignes de code par méthode : " + String.format("%.2f", getAvgLinesPerMethod()));
+        System.out.println("7. Nombre moyen d'attributs par classe : " + String.format("%.2f", getAvgAttributesPerClass()));
+
+        System.out.println("8. Les 10% des classes qui possèdent le plus grand nombre de méthodes :");
+        for (OOMetricsVisitor.ClassInfo classInfo : getTopMethodClasses()) {
+            System.out.println("   - " + classInfo.name + " : " + classInfo.methodCount + " méthodes");
+        }
+
+        System.out.println("9. Les 10% des classes qui possèdent le plus grand nombre d'attributs :");
+        for (OOMetricsVisitor.ClassInfo classInfo : getTopAttributeClasses()) {
+            System.out.println("   - " + classInfo.name + " : " + classInfo.attributeCount + " attributs");
+        }
+
+        System.out.println("10. Les classes qui font partie en même temps des deux catégories précédentes :");
+        for (OOMetricsVisitor.ClassInfo classInfo : getTopMethodAndAttributeClasses()) {
+            System.out.println("   - " + classInfo.name + " : " + classInfo.methodCount + " méthodes, " + classInfo.attributeCount + " attributs");
+        }
+
+        System.out.println("11. Les classes qui possèdent plus de " + methodThreshold + " méthodes :");
+        for (OOMetricsVisitor.ClassInfo classInfo : getClassesWithManyMethods()) {
+            System.out.println("   - " + classInfo.name + " : " + classInfo.methodCount + " méthodes");
+        }
+
+        System.out.println("12. Les 10% des méthodes qui possèdent le plus grand nombre de lignes de code (par classe) :");
+        for (OOMetricsVisitor.ClassInfo classInfo : allClassInfos) {
+            int topMethodsCount = Math.max(1, classInfo.methodInfos.size() / 10);
+            List<OOMetricsVisitor.MethodInfo> topMethods = classInfo.methodInfos.stream()
+                    .sorted((m1, m2) -> Integer.compare(m2.lineCount, m1.lineCount))
+                    .limit(topMethodsCount)
+                    .collect(Collectors.toList());
+
+            System.out.println("   Classe : " + classInfo.name);
+            for (OOMetricsVisitor.MethodInfo methodInfo : topMethods) {
+                System.out.println("      - " + methodInfo.name + " : " + methodInfo.lineCount + " lignes");
+            }
+        }
+
+        System.out.println("13. Le nombre maximal de paramètres par rapport à toutes les méthodes de l'application : " + getMaxParameters());
+
+        printCallGraph();
+    }
+
+    public void printCallGraph() {
+        System.out.println("\n####################");
+
+        System.out.println("\nGraphe d'appel :\n");
+        for (Map.Entry<String, Set<String>> entry : callGraph.entrySet()) {
+            if (!entry.getValue().isEmpty()) {
+                System.out.println(entry.getKey() + " appelle : " + entry.getValue());
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        if (args.length < 2) {
+            System.out.println("Veuillez fournir le chemin du répertoire du projet Java à analyser et la valeur de X pour le nombre de méthodes.");
+            return;
+        }
+
+        String projectPath = args[0];
+        int methodThreshold = Integer.parseInt(args[1]);
+
+        ASTAnalyzer analyzer = new ASTAnalyzer();
+        analyzer.analyze(projectPath, methodThreshold);
+        analyzer.printResults();
+    }
+
+    private static List<Path> findJavaFiles(String projectPath) {
+        try {
+            return Files.walk(Paths.get(projectPath))
+                    .filter(Files::isRegularFile)
+                    .filter(p -> p.toString().endsWith(".java"))
+                    .collect(Collectors.toList());
+        } catch (IOException e) {
+            System.err.println("Erreur lors de la recherche des fichiers Java : " + e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private static String readFile(String filePath) {
+        try {
+            return new String(Files.readAllBytes(Paths.get(filePath)));
+        } catch (IOException e) {
+            System.err.println("Erreur lors de la lecture du fichier : " + e.getMessage());
+            return null;
+        }
+    }
+}
